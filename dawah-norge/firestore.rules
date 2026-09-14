@@ -20,7 +20,6 @@ service cloud.firestore {
           "phone",
           "gender",
           "city",
-          "shahadaLocation",
           "shahadaDate",
           "consentConfirmed",
           "createdByUid",
@@ -34,7 +33,8 @@ service cloud.firestore {
         && request.resource.data.name.size() <= 120
         && request.resource.data.gender in ["woman", "man"]
         && request.resource.data.city is string
-        && request.resource.data.shahadaLocation is string
+        && request.resource.data.city.size() > 0
+        && request.resource.data.city.size() <= 120
         && request.resource.data.shahadaDate is timestamp
         && request.resource.data.consentConfirmed == true
         && request.resource.data.createdByUid == request.auth.uid
