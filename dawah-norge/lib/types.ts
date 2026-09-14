@@ -24,7 +24,6 @@ export interface NewMuslim {
   phone: string;
   gender: Gender;
   city: string;
-  shahadaLocation: string;
   shahadaDate: Date | null;
   preferredLanguage: string;
   preferredContact: ContactMethod;
@@ -62,7 +61,6 @@ export interface PersonFormValues {
   phone: string;
   gender: Gender | "";
   city: string;
-  shahadaLocation: string;
   shahadaDate: string;
   preferredLanguage: string;
   preferredContact: ContactMethod;
@@ -87,7 +85,6 @@ export const emptyPersonForm: PersonFormValues = {
   phone: "",
   gender: "",
   city: "",
-  shahadaLocation: "",
   shahadaDate: "",
   preferredLanguage: "Norsk",
   preferredContact: "phone",
