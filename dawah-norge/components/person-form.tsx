@@ -144,22 +144,17 @@ export function PersonForm({
           </Select>
         </Field>
 
-        <Field label="By eller område" htmlFor="person-city" required>
+        <Field
+          label="By der shahada ble tatt"
+          htmlFor="person-city"
+          hint="Byen brukes som avdeling og blir automatisk tilgjengelig i byfilteret."
+          required
+        >
           <Input
             id="person-city"
             value={form.city}
             onChange={(event) => update("city", event.target.value)}
             placeholder="For eksempel Oslo"
-            required
-          />
-        </Field>
-
-        <Field label="Sted for shahada" htmlFor="person-location" required>
-          <Input
-            id="person-location"
-            value={form.shahadaLocation}
-            onChange={(event) => update("shahadaLocation", event.target.value)}
-            placeholder="Moské, arrangement eller annet sted"
             required
           />
         </Field>

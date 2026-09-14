@@ -24,7 +24,9 @@ import {
 } from "firebase/auth";
 import {
   Activity,
+  BarChart3,
   BellRing,
+  Building2,
   CalendarDays,
   CheckCircle2,
   ChevronRight,
@@ -33,9 +35,9 @@ import {
   Download,
   Eye,
   EyeOff,
+  FileSpreadsheet,
   FileWarning,
   LayoutDashboard,
-  ListFilter,
   Loader2,
   LogOut,
   MapPin,
@@ -67,7 +69,6 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -82,6 +83,13 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Sheet,
   SheetContent,
@@ -110,8 +118,48 @@ import {
   PersonFormValues,
 } from "@/lib/types";
 
-type Screen = "overview" | "people" | "alerts" | "register";
+type Screen = "overview" | "people" | "statistics" | "alerts" | "register";
 type ListFilterValue = "all" | "never" | "once" | "twice" | "threePlus" | "active" | "inactive";
+
+interface CityOption {
+  key: string;
+  label: string;
+  count: number;
+}
+
+interface DistributionItem {
+  key: string;
+  label: string;
+  count: number;
+  percent: number;
+}
+
+interface StatisticsSummary {
+  total: number;
+  never: number;
+  due: number;
+  active: number;
+  inactive: number;
+  unknownActivity: number;
+  newThisMonth: number;
+  contacted: number;
+  contactRate: number;
+  totalContacts: number;
+  averageContacts: number;
+  averageFirstResponseDays: number | null;
+  women: number;
+  men: number;
+  cities: CityOption[];
+  genderDistribution: DistributionItem[];
+  activityDistribution: DistributionItem[];
+  contactDistribution: DistributionItem[];
+  monthlyRegistrations: { key: string; label: string; count: number }[];
+}
+
+interface ExportPerson {
+  person: NewMuslim;
+  contacts: ContactEntry[];
+}
 
 const activityLabel: Record<FaithActivity, string> = {
   unknown: "Vet ikke",
@@ -141,6 +189,50 @@ const statusLabel = {
   paused: "Satt på pause",
   closed: "Avsluttet",
 };
+
+const consentMethodLabel = {
+  verbal: "Muntlig",
+  written: "Skriftlig",
+  digital: "Digitalt",
+};
+
+function percentage(value: number, total: number): number {
+  return total > 0 ? Math.round((value / total) * 100) : 0;
+}
+
+function normalizeCity(value: string): string {
+  return value
+    .trim()
+    .replace(/\s+/g, " ")
+    .split(" ")
+    .map((word) => word
+      ? `${word.slice(0, 1).toLocaleUpperCase("nb-NO")}${word.slice(1).toLocaleLowerCase("nb-NO")}`
+      : word)
+    .join(" ");
+}
+
+function cityKey(value: string): string {
+  return value.trim().toLocaleLowerCase("nb-NO");
+}
+
+function toExportDate(value: Date | null): string {
+  return value ? value.toISOString().slice(0, 10) : "";
+}
+
+function csvCell(value: string | number | boolean | null | undefined): string {
+  const text = String(value ?? "").replace(/\r?\n/g, " ");
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+function downloadFile(contents: BlobPart, type: string, filename: string) {
+  const blob = new Blob([contents], { type });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
 
 function asDate(value: unknown, fallback: Date | null = null): Date | null {
   if (!value) return fallback;
@@ -208,6 +300,93 @@ function attentionFor(person: NewMuslim) {
   return null;
 }
 
+function summarizePeople(people: NewMuslim[]): StatisticsSummary {
+  const thisMonth = new Date();
+  thisMonth.setDate(1);
+  thisMonth.setHours(0, 0, 0, 0);
+
+  const cityMap = new Map<string, CityOption>();
+  for (const person of people) {
+    const label = normalizeCity(person.city) || "Ukjent by";
+    const key = cityKey(label);
+    const current = cityMap.get(key);
+    cityMap.set(key, { key, label, count: (current?.count ?? 0) + 1 });
+  }
+
+  const cities = [...cityMap.values()].sort((a, b) =>
+    b.count - a.count || a.label.localeCompare(b.label, "nb-NO"),
+  );
+  const total = people.length;
+  const women = people.filter((person) => person.gender === "woman").length;
+  const men = people.filter((person) => person.gender === "man").length;
+  const active = people.filter((person) => person.faithActivity === "active").length;
+  const inactive = people.filter((person) => person.faithActivity === "inactive").length;
+  const unknownActivity = total - active - inactive;
+  const never = people.filter((person) => person.contactCount === 0).length;
+  const once = people.filter((person) => person.contactCount === 1).length;
+  const twice = people.filter((person) => person.contactCount === 2).length;
+  const threePlus = people.filter((person) => person.contactCount >= 3).length;
+  const totalContacts = people.reduce((sum, person) => sum + person.contactCount, 0);
+  const firstResponseDays = people
+    .filter((person) => person.firstContactAt)
+    .map((person) => Math.max(0, Math.round(
+      ((person.firstContactAt?.getTime() ?? person.createdAt.getTime()) - person.createdAt.getTime()) / 86_400_000,
+    )));
+
+  const monthlyRegistrations = Array.from({ length: 6 }, (_, index) => {
+    const date = new Date();
+    date.setDate(1);
+    date.setHours(0, 0, 0, 0);
+    date.setMonth(date.getMonth() - (5 - index));
+    const year = date.getFullYear();
+    const month = date.getMonth();
+    return {
+      key: `${year}-${String(month + 1).padStart(2, "0")}`,
+      label: new Intl.DateTimeFormat("nb-NO", { month: "short" }).format(date).replace(".", ""),
+      count: people.filter((person) => {
+        const value = person.shahadaDate ?? person.createdAt;
+        return value.getFullYear() === year && value.getMonth() === month;
+      }).length,
+    };
+  });
+
+  return {
+    total,
+    never,
+    due: people.filter((person) => attentionFor(person)?.level === "red").length,
+    active,
+    inactive,
+    unknownActivity,
+    newThisMonth: people.filter((person) => person.createdAt >= thisMonth).length,
+    contacted: total - never,
+    contactRate: percentage(total - never, total),
+    totalContacts,
+    averageContacts: total > 0 ? Math.round((totalContacts / total) * 10) / 10 : 0,
+    averageFirstResponseDays: firstResponseDays.length > 0
+      ? Math.round((firstResponseDays.reduce((sum, days) => sum + days, 0) / firstResponseDays.length) * 10) / 10
+      : null,
+    women,
+    men,
+    cities,
+    genderDistribution: [
+      { key: "woman", label: "Kvinner", count: women, percent: percentage(women, total) },
+      { key: "man", label: "Menn", count: men, percent: percentage(men, total) },
+    ],
+    activityDistribution: [
+      { key: "active", label: "Aktive", count: active, percent: percentage(active, total) },
+      { key: "inactive", label: "Ikke aktive", count: inactive, percent: percentage(inactive, total) },
+      { key: "unknown", label: "Vet ikke", count: unknownActivity, percent: percentage(unknownActivity, total) },
+    ],
+    contactDistribution: [
+      { key: "never", label: "Aldri kontaktet", count: never, percent: percentage(never, total) },
+      { key: "once", label: "Kontaktet 1 gang", count: once, percent: percentage(once, total) },
+      { key: "twice", label: "Kontaktet 2 ganger", count: twice, percent: percentage(twice, total) },
+      { key: "threePlus", label: "Kontaktet 3+ ganger", count: threePlus, percent: percentage(threePlus, total) },
+    ],
+    monthlyRegistrations,
+  };
+}
+
 function personFromSnapshot(id: string, data: Record<string, unknown>): NewMuslim {
   const now = new Date();
   return {
@@ -216,7 +395,6 @@ function personFromSnapshot(id: string, data: Record<string, unknown>): NewMusli
     phone: String(data.phone ?? ""),
     gender: data.gender === "man" ? "man" : "woman",
     city: String(data.city ?? ""),
-    shahadaLocation: String(data.shahadaLocation ?? ""),
     shahadaDate: asDate(data.shahadaDate),
     preferredLanguage: String(data.preferredLanguage ?? ""),
     preferredContact: (data.preferredContact as NewMuslim["preferredContact"]) ?? "phone",
@@ -272,7 +450,6 @@ const demoPeople: NewMuslim[] = [
     phone: "+47 900 00 001",
     gender: "woman",
     city: "Oslo",
-    shahadaLocation: "Dawah-stand, Oslo",
     shahadaDate: dateDaysAgo(38),
     preferredLanguage: "Norsk",
     preferredContact: "phone",
@@ -298,7 +475,6 @@ const demoPeople: NewMuslim[] = [
     phone: "+47 900 00 002",
     gender: "man",
     city: "Drammen",
-    shahadaLocation: "Fjell moské",
     shahadaDate: dateDaysAgo(24),
     preferredLanguage: "Engelsk",
     preferredContact: "whatsapp",
@@ -324,7 +500,6 @@ const demoPeople: NewMuslim[] = [
     phone: "+47 900 00 003",
     gender: "woman",
     city: "Bergen",
-    shahadaLocation: "Bergen moské",
     shahadaDate: dateDaysAgo(76),
     preferredLanguage: "Norsk",
     preferredContact: "sms",
@@ -350,7 +525,6 @@ const demoPeople: NewMuslim[] = [
     phone: "+47 900 00 004",
     gender: "man",
     city: "Trondheim",
-    shahadaLocation: "Islamisk kultursenter",
     shahadaDate: dateDaysAgo(5),
     preferredLanguage: "Engelsk",
     preferredContact: "phone",
@@ -405,7 +579,6 @@ function valuesFromPerson(person: NewMuslim): PersonFormValues {
     phone: person.phone,
     gender: person.gender,
     city: person.city,
-    shahadaLocation: person.shahadaLocation,
     shahadaDate: toInputDate(person.shahadaDate),
     preferredLanguage: person.preferredLanguage,
     preferredContact: person.preferredContact,
@@ -423,8 +596,7 @@ function personPayload(values: PersonFormValues, user: AppUser) {
     name: values.name.trim(),
     phone: values.phone.trim(),
     gender: values.gender,
-    city: values.city.trim(),
-    shahadaLocation: values.shahadaLocation.trim(),
+    city: normalizeCity(values.city),
     shahadaDate: Timestamp.fromDate(localDate(values.shahadaDate)),
     preferredLanguage: values.preferredLanguage.trim(),
     preferredContact: values.preferredContact,
@@ -801,21 +973,209 @@ function PersonCard({ person, onOpen }: { person: NewMuslim; onOpen: () => void 
   );
 }
 
+function DistributionRow({
+  item,
+  color,
+  onClick,
+}: {
+  item: DistributionItem;
+  color: string;
+  onClick?: () => void;
+}) {
+  const content = (
+    <>
+      <div className="flex items-center justify-between gap-3 text-sm">
+        <span className="font-medium text-[#385950]">{item.label}</span>
+        <span className="shrink-0 text-[#697a74]">
+          <strong className="font-semibold text-[#244b43]">{item.count}</strong> · {item.percent} %
+        </span>
+      </div>
+      <div className="mt-2 h-2 overflow-hidden rounded-full bg-[#edf2f0]">
+        <div className={`h-full rounded-full ${color}`} style={{ width: `${item.percent}%` }} />
+      </div>
+    </>
+  );
+
+  return onClick ? (
+    <button type="button" onClick={onClick} className="block w-full rounded-xl p-2 text-left transition hover:bg-[#f4f8f6]">
+      {content}
+    </button>
+  ) : (
+    <div className="p-2">{content}</div>
+  );
+}
+
+function StatisticsView({
+  summary,
+  loading,
+  exporting,
+  onExport,
+  onCityOpen,
+  onFilterOpen,
+}: {
+  summary: StatisticsSummary;
+  loading: boolean;
+  exporting: boolean;
+  onExport: () => void;
+  onCityOpen: (city: CityOption) => void;
+  onFilterOpen: (filter: ListFilterValue) => void;
+}) {
+  const maxMonth = Math.max(1, ...summary.monthlyRegistrations.map((item) => item.count));
+  const maxCity = Math.max(1, ...summary.cities.map((item) => item.count));
+
+  return (
+    <section className="space-y-6">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+        <div className="max-w-2xl">
+          <p className="text-sm font-semibold text-[#357363]">Hele organisasjonen</p>
+          <h2 className="mt-1 text-3xl font-semibold tracking-[-0.04em] text-[#173f38]">Detaljert statistikk</h2>
+          <p className="mt-2 text-sm leading-6 text-[#687873]">Tallene oppdateres automatisk fra personlisten og kontakthistorikken.</p>
+        </div>
+        <Button variant="outline" onClick={onExport} disabled={exporting || loading} className="gap-2 border-[#c8d9d3] bg-white text-[#285f52]">
+          {exporting ? <Loader2 className="size-4 animate-spin" /> : <FileSpreadsheet className="size-4" />}
+          Last ned til Excel
+        </Button>
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        {[
+          { label: "Registrerte totalt", value: summary.total, detail: "personer" },
+          { label: "Byer / avdelinger", value: summary.cities.length, detail: "med registreringer" },
+          { label: "Har blitt kontaktet", value: `${summary.contactRate} %`, detail: `${summary.contacted} av ${summary.total}` },
+          { label: "Gjennomsnittlig kontakt", value: summary.averageContacts.toLocaleString("nb-NO"), detail: `${summary.totalContacts} kontaktforsøk totalt` },
+        ].map((item) => (
+          <div key={item.label} className="rounded-[20px] border border-[#dce6e2] bg-white p-5 shadow-sm">
+            <p className="text-sm font-medium text-[#6d7d77]">{item.label}</p>
+            <p className="mt-3 text-3xl font-semibold tracking-[-0.04em] text-[#173f38]">{item.value}</p>
+            <p className="mt-1 text-xs text-[#7b8984]">{item.detail}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="grid gap-5 xl:grid-cols-[1.15fr_0.85fr]">
+        <div className="rounded-[22px] border border-[#dce6e2] bg-white p-5 shadow-sm sm:p-6">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h3 className="text-lg font-semibold text-[#1c453d]">Shahadaer siste seks måneder</h3>
+              <p className="mt-1 text-sm text-[#71807b]">Basert på registrert shahada-dato</p>
+            </div>
+            <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-[#e9f5f0] text-[#276b59]"><BarChart3 className="size-5" /></span>
+          </div>
+          <div className="mt-8 flex h-52 items-end gap-3 border-b border-[#dfe8e4] px-1">
+            {summary.monthlyRegistrations.map((item) => (
+              <div key={item.key} className="flex h-full min-w-0 flex-1 flex-col justify-end text-center">
+                <span className="mb-2 text-xs font-semibold text-[#315d53]">{item.count}</span>
+                <div
+                  className="mx-auto w-full max-w-12 rounded-t-lg bg-[#4f927f] transition-all"
+                  style={{ height: item.count > 0 ? `${Math.max(10, (item.count / maxMonth) * 100)}%` : "4px" }}
+                />
+                <span className="mt-2 pb-2 text-xs capitalize text-[#73817c]">{item.label}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="rounded-[22px] border border-[#dce6e2] bg-white p-5 shadow-sm sm:p-6">
+          <h3 className="text-lg font-semibold text-[#1c453d]">Kjønnsfordeling</h3>
+          <p className="mt-1 text-sm text-[#71807b]">Antall og prosent av alle registrerte</p>
+          <div className="mt-6 space-y-4">
+            {summary.genderDistribution.map((item, index) => (
+              <DistributionRow key={item.key} item={item} color={index === 0 ? "bg-[#8b6caf]" : "bg-[#4f8098]"} />
+            ))}
+          </div>
+          <div className="mt-7 rounded-2xl bg-[#f3f7f5] p-4">
+            <p className="text-xs font-medium uppercase tracking-[0.08em] text-[#74837e]">Første kontakt</p>
+            <p className="mt-2 text-2xl font-semibold text-[#214a41]">
+              {summary.averageFirstResponseDays === null ? "Ikke nok data" : `${summary.averageFirstResponseDays.toLocaleString("nb-NO")} dager`}
+            </p>
+            <p className="mt-1 text-xs leading-5 text-[#74837e]">Gjennomsnitt fra registrering til første registrerte kontakt.</p>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid gap-5 xl:grid-cols-2">
+        <div className="rounded-[22px] border border-[#dce6e2] bg-white p-5 shadow-sm sm:p-6">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h3 className="text-lg font-semibold text-[#1c453d]">Byer og avdelinger</h3>
+              <p className="mt-1 text-sm text-[#71807b]">Klikk på en by for å åpne personlisten</p>
+            </div>
+            <Building2 className="size-5 text-[#4b7f71]" />
+          </div>
+          <div className="mt-5 space-y-1">
+            {summary.cities.map((city, index) => (
+              <button key={city.key} type="button" onClick={() => onCityOpen(city)} className="group block w-full rounded-xl p-2 text-left transition hover:bg-[#f4f8f6]">
+                <div className="flex items-center justify-between gap-3 text-sm">
+                  <span className="font-medium text-[#385950]"><span className="mr-2 text-xs text-[#96a39e]">{index + 1}</span>{city.label}</span>
+                  <span className="shrink-0 text-[#697a74]"><strong className="font-semibold text-[#244b43]">{city.count}</strong> · {percentage(city.count, summary.total)} %</span>
+                </div>
+                <div className="mt-2 h-2 overflow-hidden rounded-full bg-[#edf2f0]">
+                  <div className="h-full rounded-full bg-[#5d9887]" style={{ width: `${(city.count / maxCity) * 100}%` }} />
+                </div>
+              </button>
+            ))}
+            {summary.cities.length === 0 ? <p className="py-10 text-center text-sm text-[#74827e]">Ingen byer er registrert ennå.</p> : null}
+          </div>
+        </div>
+
+        <div className="space-y-5">
+          <div className="rounded-[22px] border border-[#dce6e2] bg-white p-5 shadow-sm sm:p-6">
+            <h3 className="text-lg font-semibold text-[#1c453d]">Kontaktoppfølging</h3>
+            <p className="mt-1 text-sm text-[#71807b]">Klikk på en gruppe for å åpne listen</p>
+            <div className="mt-5 space-y-1">
+              {summary.contactDistribution.map((item) => (
+                <DistributionRow key={item.key} item={item} color="bg-[#d09238]" onClick={() => onFilterOpen(item.key as ListFilterValue)} />
+              ))}
+            </div>
+          </div>
+
+          <div className="rounded-[22px] border border-[#dce6e2] bg-white p-5 shadow-sm sm:p-6">
+            <h3 className="text-lg font-semibold text-[#1c453d]">Aktivitet i islam</h3>
+            <p className="mt-1 text-sm text-[#71807b]">Status satt av styret</p>
+            <div className="mt-5 space-y-1">
+              {summary.activityDistribution.map((item) => (
+                <DistributionRow
+                  key={item.key}
+                  item={item}
+                  color={item.key === "active" ? "bg-[#42826e]" : item.key === "inactive" ? "bg-[#bf665b]" : "bg-[#97a39f]"}
+                  onClick={item.key === "active" || item.key === "inactive" ? () => onFilterOpen(item.key as ListFilterValue) : undefined}
+                />
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function PeopleList({
   people,
+  total,
   loading,
   search,
   setSearch,
   filter,
   setFilter,
+  cities,
+  cityFilter,
+  setCityFilter,
+  exporting,
+  onExport,
   onOpen,
 }: {
   people: NewMuslim[];
+  total: number;
   loading: boolean;
   search: string;
   setSearch: (value: string) => void;
   filter: ListFilterValue;
   setFilter: (value: ListFilterValue) => void;
+  cities: CityOption[];
+  cityFilter: string;
+  setCityFilter: (value: string) => void;
+  exporting: boolean;
+  onExport: () => void;
   onOpen: (person: NewMuslim) => void;
 }) {
   const filters: { value: ListFilterValue; label: string }[] = [
@@ -833,17 +1193,41 @@ function PeopleList({
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h2 className="text-2xl font-semibold tracking-[-0.035em] text-[#173f38]">Personer</h2>
-          <p className="mt-1 text-sm text-[#6c7a76]">{people.length} vises i listen</p>
+          <p className="mt-1 text-sm text-[#6c7a76]">{people.length} av {total} vises i listen</p>
         </div>
-        <div className="relative w-full sm:w-80">
-          <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-[#82908b]" />
-          <Input
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            placeholder="Søk navn, telefon eller sted"
-            className="h-11 bg-white pl-10"
-          />
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+          <div className="relative w-full sm:w-72">
+            <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-[#82908b]" />
+            <Input
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Søk navn, telefon eller by"
+              className="h-11 bg-white pl-10"
+            />
+          </div>
+          <Button variant="outline" onClick={onExport} disabled={exporting || loading} className="h-11 gap-2 border-[#c8d9d3] bg-white text-[#285f52]">
+            {exporting ? <Loader2 className="size-4 animate-spin" /> : <FileSpreadsheet className="size-4" />}
+            Eksporter alle
+          </Button>
         </div>
+      </div>
+
+      <div className="mt-5 flex flex-col gap-3 rounded-2xl border border-[#d8e4df] bg-white p-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <p className="text-sm font-semibold text-[#244b43]">By / avdeling</p>
+          <p className="mt-0.5 text-xs text-[#74827e]">Listen inneholder bare byer som finnes i registreringene.</p>
+        </div>
+        <Select value={cityFilter} onValueChange={setCityFilter}>
+          <SelectTrigger className="w-full bg-[#f8faf9] sm:w-64" aria-label="Filtrer etter by">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">Alle byer ({total})</SelectItem>
+            {cities.slice().sort((a, b) => a.label.localeCompare(b.label, "nb-NO")).map((city) => (
+              <SelectItem key={city.key} value={city.key}>{city.label} ({city.count})</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
 
       <div className="scrollbar-none mt-5 flex gap-2 overflow-x-auto pb-2">
@@ -876,7 +1260,7 @@ function PeopleList({
               <TableHeader>
                 <TableRow className="border-[#e2eae7] bg-[#f7faf9] hover:bg-[#f7faf9]">
                   <TableHead className="pl-5">Navn</TableHead>
-                  <TableHead>Område</TableHead>
+                  <TableHead>By / avdeling</TableHead>
                   <TableHead>Kontakt</TableHead>
                   <TableHead>Aktivitet</TableHead>
                   <TableHead>Oppmerksomhet</TableHead>
@@ -903,6 +1287,7 @@ function BoardApp({ user, onLogout, demo }: { user: AppUser; onLogout: () => voi
   const [loading, setLoading] = useState(!demo);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<ListFilterValue>("all");
+  const [cityFilter, setCityFilter] = useState("all");
   const [selected, setSelected] = useState<NewMuslim | null>(null);
   const [contacts, setContacts] = useState<ContactEntry[]>([]);
   const [demoContacts, setDemoContacts] = useState<Record<string, ContactEntry[]>>(demoContactSeed);
@@ -944,24 +1329,21 @@ function BoardApp({ user, onLogout, demo }: { user: AppUser; onLogout: () => voi
     });
   }, [selected, demo, demoContacts]);
 
-  const stats = useMemo(() => {
-    const thisMonth = new Date();
-    thisMonth.setDate(1);
-    thisMonth.setHours(0, 0, 0, 0);
-    return {
-      total: people.length,
-      never: people.filter((person) => person.contactCount === 0).length,
-      due: people.filter((person) => attentionFor(person)?.level === "red").length,
-      active: people.filter((person) => person.faithActivity === "active").length,
-      newThisMonth: people.filter((person) => person.createdAt >= thisMonth).length,
-    };
-  }, [people]);
+  const stats = useMemo(() => summarizePeople(people), [people]);
+
+  useEffect(() => {
+    if (cityFilter !== "all" && !stats.cities.some((city) => city.key === cityFilter)) {
+      setCityFilter("all");
+    }
+  }, [cityFilter, stats.cities]);
 
   const filteredPeople = useMemo(() => {
     const term = search.trim().toLocaleLowerCase("nb-NO");
     return people.filter((person) => {
-      const matchesSearch = !term || [person.name, person.phone, person.city, person.shahadaLocation]
+      const matchesSearch = !term || [person.name, person.phone, person.city]
         .some((value) => value.toLocaleLowerCase("nb-NO").includes(term));
+      const personCityKey = cityKey(normalizeCity(person.city) || "Ukjent by");
+      const matchesCity = cityFilter === "all" || cityFilter === personCityKey;
       const matchesFilter =
         filter === "all" ||
         (filter === "never" && person.contactCount === 0) ||
@@ -970,9 +1352,9 @@ function BoardApp({ user, onLogout, demo }: { user: AppUser; onLogout: () => voi
         (filter === "threePlus" && person.contactCount >= 3) ||
         (filter === "active" && person.faithActivity === "active") ||
         (filter === "inactive" && person.faithActivity === "inactive");
-      return matchesSearch && matchesFilter;
+      return matchesSearch && matchesCity && matchesFilter;
     });
-  }, [people, search, filter]);
+  }, [people, search, filter, cityFilter]);
 
   const alertPeople = useMemo(
     () => people.filter((person) => attentionFor(person)).sort((a, b) => {
@@ -987,6 +1369,18 @@ function BoardApp({ user, onLogout, demo }: { user: AppUser; onLogout: () => voi
     setScreen(next);
     if (nextFilter) setFilter(nextFilter);
     setMobileMenuOpen(false);
+  };
+
+  const openCity = (city: CityOption) => {
+    setSearch("");
+    setCityFilter(city.key);
+    navigate("people", "all");
+  };
+
+  const openFilter = (nextFilter: ListFilterValue) => {
+    setSearch("");
+    setCityFilter("all");
+    navigate("people", nextFilter);
   };
 
   useEffect(() => {
@@ -1038,8 +1432,7 @@ function BoardApp({ user, onLogout, demo }: { user: AppUser; onLogout: () => voi
         preferredLanguage: values.preferredLanguage.trim(),
         name: values.name.trim(),
         phone: values.phone.trim(),
-        city: values.city.trim(),
-        shahadaLocation: values.shahadaLocation.trim(),
+        city: normalizeCity(values.city),
         bestContactTime: values.bestContactTime.trim(),
         notes: values.notes.trim(),
         contactCount: 0,
@@ -1077,6 +1470,7 @@ function BoardApp({ user, onLogout, demo }: { user: AppUser; onLogout: () => voi
         ...selected,
         ...values,
         gender: values.gender || selected.gender,
+        city: normalizeCity(values.city),
         shahadaDate: localDate(values.shahadaDate),
         updatedAt: new Date(),
         updatedByEmail: user.email,
@@ -1088,7 +1482,13 @@ function BoardApp({ user, onLogout, demo }: { user: AppUser; onLogout: () => voi
     }
     if (!db) throw new Error("Databasen er ikke tilgjengelig.");
     await updateDoc(doc(db, "newMuslims", selected.id), personPayload(values, user));
-    setSelected((current) => current ? { ...current, ...values, gender: values.gender || current.gender, shahadaDate: localDate(values.shahadaDate) } : null);
+    setSelected((current) => current ? {
+      ...current,
+      ...values,
+      gender: values.gender || current.gender,
+      city: normalizeCity(values.city),
+      shahadaDate: localDate(values.shahadaDate),
+    } : null);
     toast.success("Endringene er lagret.");
   };
 
@@ -1159,35 +1559,118 @@ function BoardApp({ user, onLogout, demo }: { user: AppUser; onLogout: () => voi
     toast.success("Kontakten er registrert.");
   };
 
+  const loadExportData = async (): Promise<ExportPerson[]> => {
+    if (demo) {
+      return people.map((person) => ({ person, contacts: demoContacts[person.id] ?? [] }));
+    }
+    if (!db) throw new Error("Databasen er ikke tilgjengelig.");
+    const personSnapshot = await getDocs(query(collection(db, "newMuslims"), orderBy("createdAt", "desc")));
+    return Promise.all(personSnapshot.docs.map(async (personDocument) => {
+      const contactSnapshot = await getDocs(query(
+        collection(db!, "newMuslims", personDocument.id, "contacts"),
+        orderBy("contactedAt", "desc"),
+      ));
+      return {
+        person: personFromSnapshot(personDocument.id, personDocument.data()),
+        contacts: contactSnapshot.docs.map((entry) => contactFromSnapshot(entry.id, entry.data())),
+      };
+    }));
+  };
+
   const exportBackup = async () => {
     if (!window.confirm("Sikkerhetskopien inneholder sensitive personopplysninger. Lagre den bare på et sikkert, kryptert sted. Vil du fortsette?")) return;
     setExporting(true);
     try {
-      let payload: unknown;
-      if (demo) {
-        payload = people.map((person) => ({ ...person, contacts: demoContacts[person.id] ?? [] }));
-      } else {
-        if (!db) throw new Error("Databasen er ikke tilgjengelig.");
-        const personSnapshot = await getDocs(query(collection(db, "newMuslims"), orderBy("createdAt", "desc")));
-        payload = await Promise.all(personSnapshot.docs.map(async (personDocument) => {
-          const contactSnapshot = await getDocs(query(collection(db!, "newMuslims", personDocument.id, "contacts"), orderBy("contactedAt", "desc")));
-          return {
-            id: personDocument.id,
-            ...personDocument.data(),
-            contacts: contactSnapshot.docs.map((entry) => ({ id: entry.id, ...entry.data() })),
-          };
-        }));
-      }
-      const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), people: payload }, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = `dawah-norge-sikkerhetskopi-${new Date().toISOString().slice(0, 10)}.json`;
-      anchor.click();
-      URL.revokeObjectURL(url);
+      const payload = await loadExportData();
+      downloadFile(
+        JSON.stringify({
+          exportedAt: new Date().toISOString(),
+          people: payload.map(({ person, contacts }) => ({ ...person, contacts })),
+        }, null, 2),
+        "application/json",
+        `dawah-norge-sikkerhetskopi-${new Date().toISOString().slice(0, 10)}.json`,
+      );
       toast.success("Sikkerhetskopien er lastet ned.");
     } catch {
       toast.error("Sikkerhetskopien kunne ikke opprettes.");
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const exportPeopleCsv = async () => {
+    if (!window.confirm("Excel-filen inneholder sensitive personopplysninger og kontakthistorikk. Lagre den bare på et sikkert sted. Vil du fortsette?")) return;
+    setExporting(true);
+    try {
+      const payload = await loadExportData();
+      const headers = [
+        "ID",
+        "Navn",
+        "Telefonnummer",
+        "Kjønn",
+        "By / avdeling",
+        "Dato for shahada",
+        "Foretrukket språk",
+        "Foretrukket kontakt",
+        "Beste kontakttid",
+        "Aktivitet i islam",
+        "Oppfølgingsstatus",
+        "Antall kontakter",
+        "Første kontakt",
+        "Siste kontakt",
+        "Neste oppfølging",
+        "Kontakthistorikk",
+        "Merknad",
+        "Samtykke bekreftet",
+        "Samtykkemåte",
+        "Registrert dato",
+        "Registrert av",
+        "Sist endret",
+        "Sist endret av",
+      ];
+      const rows = payload.map(({ person, contacts }) => {
+        const history = contacts.map((contact) => [
+          toExportDate(contact.contactedAt),
+          methodLabel[contact.method],
+          outcomeLabel[contact.outcome],
+          contact.notes,
+          contact.nextFollowUpAt ? `neste: ${toExportDate(contact.nextFollowUpAt)}` : "",
+        ].filter(Boolean).join(" – ")).join(" | ");
+        return [
+          person.id,
+          person.name,
+          person.phone,
+          person.gender === "woman" ? "Kvinne" : "Mann",
+          person.city,
+          toExportDate(person.shahadaDate),
+          person.preferredLanguage,
+          methodLabel[person.preferredContact],
+          person.bestContactTime,
+          activityLabel[person.faithActivity],
+          statusLabel[person.followUpStatus],
+          person.contactCount,
+          toExportDate(person.firstContactAt),
+          toExportDate(person.lastContactAt),
+          toExportDate(person.nextFollowUpAt),
+          history,
+          person.notes,
+          person.consentConfirmed ? "Ja" : "Nei",
+          consentMethodLabel[person.consentMethod],
+          toExportDate(person.createdAt),
+          person.createdByEmail,
+          toExportDate(person.updatedAt),
+          person.updatedByEmail,
+        ];
+      });
+      const csv = `\uFEFF${[headers, ...rows].map((row) => row.map(csvCell).join(";")).join("\r\n")}`;
+      downloadFile(
+        csv,
+        "text/csv;charset=utf-8",
+        `dawah-norge-personliste-${new Date().toISOString().slice(0, 10)}.csv`,
+      );
+      toast.success("Excel-filen er lastet ned.");
+    } catch {
+      toast.error("Excel-filen kunne ikke opprettes.");
     } finally {
       setExporting(false);
     }
@@ -1223,6 +1706,7 @@ function BoardApp({ user, onLogout, demo }: { user: AppUser; onLogout: () => voi
   const navItems: { value: Screen; label: string; icon: React.ReactNode }[] = [
     { value: "overview", label: "Oversikt", icon: <LayoutDashboard className="size-[18px]" /> },
     { value: "people", label: "Personer", icon: <Users className="size-[18px]" /> },
+    { value: "statistics", label: "Statistikk", icon: <BarChart3 className="size-[18px]" /> },
     { value: "alerts", label: "Varsler", icon: <BellRing className="size-[18px]" /> },
     { value: "register", label: "Ny registrering", icon: <UserPlus className="size-[18px]" /> },
   ];
@@ -1230,6 +1714,7 @@ function BoardApp({ user, onLogout, demo }: { user: AppUser; onLogout: () => voi
   const screenTitle = {
     overview: "Oversikt",
     people: "Alle personer",
+    statistics: "Statistikk",
     alerts: "Varsler og oppfølging",
     register: "Ny registrering",
   }[screen];
@@ -1274,6 +1759,9 @@ function BoardApp({ user, onLogout, demo }: { user: AppUser; onLogout: () => voi
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent side="top" align="start" className="w-52">
+              <DropdownMenuItem onClick={exportPeopleCsv} disabled={exporting}>
+                <FileSpreadsheet className="size-4" /> Last ned til Excel
+              </DropdownMenuItem>
               <DropdownMenuItem onClick={exportBackup} disabled={exporting}>
                 <Download className="size-4" /> Last ned sikkerhetskopi
               </DropdownMenuItem>
@@ -1323,11 +1811,29 @@ function BoardApp({ user, onLogout, demo }: { user: AppUser; onLogout: () => voi
                   <p className="hidden text-sm text-[#75837f] md:block">Sist oppdatert automatisk</p>
                 </div>
                 <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                  <StatCard label="Registrerte totalt" value={stats.total} icon={<Users className="size-5" />} onClick={() => navigate("people", "all")} />
-                  <StatCard label="Aldri kontaktet" value={stats.never} icon={<Phone className="size-5" />} tone="amber" onClick={() => navigate("people", "never")} />
+                  <StatCard label="Registrerte totalt" value={stats.total} icon={<Users className="size-5" />} onClick={() => openFilter("all")} />
+                  <StatCard label="Aldri kontaktet" value={stats.never} icon={<Phone className="size-5" />} tone="amber" onClick={() => openFilter("never")} />
                   <StatCard label="Krever oppmerksomhet" value={stats.due} icon={<BellRing className="size-5" />} tone="red" onClick={() => navigate("alerts")} />
-                  <StatCard label="Registrert aktive" value={stats.active} icon={<Activity className="size-5" />} tone="blue" onClick={() => navigate("people", "active")} />
+                  <StatCard label="Registrert aktive" value={stats.active} icon={<Activity className="size-5" />} tone="blue" onClick={() => openFilter("active")} />
                 </div>
+                <button
+                  type="button"
+                  onClick={() => navigate("statistics")}
+                  className="group mt-3 flex w-full flex-col gap-5 rounded-[20px] border border-[#cfe0da] bg-[#e9f4f0] p-5 text-left transition hover:-translate-y-0.5 hover:border-[#abc9bf] hover:shadow-[0_10px_25px_rgba(20,63,55,0.07)] sm:flex-row sm:items-center sm:justify-between"
+                >
+                  <span className="flex items-center gap-4">
+                    <span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-[#143f37] text-white"><BarChart3 className="size-5" /></span>
+                    <span>
+                      <span className="block font-semibold text-[#1b463d]">Se detaljert statistikk</span>
+                      <span className="mt-1 block text-sm text-[#667a73]">Kjønn, byer, aktivitet, kontakt og utvikling</span>
+                    </span>
+                  </span>
+                  <span className="grid grid-cols-3 gap-5 sm:text-right">
+                    <span><strong className="block text-lg text-[#173f38]">{percentage(stats.women, stats.total)} %</strong><span className="text-xs text-[#6f7e79]">kvinner</span></span>
+                    <span><strong className="block text-lg text-[#173f38]">{percentage(stats.men, stats.total)} %</strong><span className="text-xs text-[#6f7e79]">menn</span></span>
+                    <span className="flex items-center gap-3 sm:justify-end"><span><strong className="block text-lg text-[#173f38]">{stats.cities.length}</strong><span className="text-xs text-[#6f7e79]">byer</span></span><ChevronRight className="size-4 text-[#628077] transition group-hover:translate-x-0.5" /></span>
+                  </span>
+                </button>
               </section>
 
               <section className="grid gap-5 xl:grid-cols-[1.35fr_0.65fr]">
@@ -1394,7 +1900,32 @@ function BoardApp({ user, onLogout, demo }: { user: AppUser; onLogout: () => voi
           ) : null}
 
           {screen === "people" ? (
-            <PeopleList people={filteredPeople} loading={loading} search={search} setSearch={setSearch} filter={filter} setFilter={setFilter} onOpen={setSelected} />
+            <PeopleList
+              people={filteredPeople}
+              total={people.length}
+              loading={loading}
+              search={search}
+              setSearch={setSearch}
+              filter={filter}
+              setFilter={setFilter}
+              cities={stats.cities}
+              cityFilter={cityFilter}
+              setCityFilter={setCityFilter}
+              exporting={exporting}
+              onExport={exportPeopleCsv}
+              onOpen={setSelected}
+            />
+          ) : null}
+
+          {screen === "statistics" ? (
+            <StatisticsView
+              summary={stats}
+              loading={loading}
+              exporting={exporting}
+              onExport={exportPeopleCsv}
+              onCityOpen={openCity}
+              onFilterOpen={openFilter}
+            />
           ) : null}
 
           {screen === "alerts" ? (
