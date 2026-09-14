@@ -1,0 +1,75 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function userProfile() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function isBoard() {
+      return signedIn() && userProfile().data.role == "board";
+    }
+
+    function validRegistration() {
+      return request.resource.data.keys().hasAll([
+          "name",
+          "phone",
+          "gender",
+          "city",
+          "shahadaLocation",
+          "shahadaDate",
+          "consentConfirmed",
+          "createdByUid",
+          "contactCount"
+        ])
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.phone is string
+        && request.resource.data.phone.size() > 0
+        && request.resource.data.phone.size() <= 40
+        && request.resource.data.name.size() <= 120
+        && request.resource.data.gender in ["woman", "man"]
+        && request.resource.data.city is string
+        && request.resource.data.shahadaLocation is string
+        && request.resource.data.shahadaDate is timestamp
+        && request.resource.data.consentConfirmed == true
+        && request.resource.data.createdByUid == request.auth.uid
+        && request.resource.data.createdByEmail == request.auth.token.email
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+    }
+
+    match /users/{userId} {
+      allow get: if signedIn() && (request.auth.uid == userId || isBoard());
+      allow list: if isBoard();
+      allow create, update, delete: if false;
+    }
+
+    match /newMuslims/{personId} {
+      allow create: if signedIn()
+        && validRegistration()
+        && (
+          isBoard()
+          || (
+            request.resource.data.contactCount == 0
+            && request.resource.data.faithActivity == "unknown"
+            && request.resource.data.followUpStatus == "new"
+          )
+        );
+
+      allow read, update, delete: if isBoard();
+
+      match /contacts/{contactId} {
+        allow read, create, update, delete: if isBoard();
+      }
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
